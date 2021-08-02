@@ -3,19 +3,25 @@
 #include "WiFi.h"
 #include "logo.h"
 
+#include <Wire.h>
 
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// Bluetooth defines
 #define SERVICE_NAME "LoRaBLE"
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define BAND    915E6  //you can set band here directly,e.g. 868E6,915E6
+
+#define Fbattery    3700  //The default battery is 3700mv when the battery is fully charged.
+
+float XS = 0.00225;      //The returned reading is multiplied by this XS to get the battery voltage.
+uint16_t MUL = 1000;
+uint16_t MMUL = 100;
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pTxCharacteristic;
@@ -200,6 +206,8 @@ void setup() {
     delay(300);
     Heltec.display->clear();
 
+    adcAttachPin(13);
+    analogSetClockDiv(255); // 1338mS
 
     Serial.begin(115200);
 
@@ -265,6 +273,9 @@ void setup() {
 
 
 void loop() {
+    uint16_t c  =  analogRead(37)*XS*MUL;
+    Serial.println(c);
+
     if (deepsleepflag) {
         LoRa.end();
         LoRa.sleep();
