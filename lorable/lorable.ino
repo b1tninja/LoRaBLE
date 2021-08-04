@@ -4,27 +4,37 @@
 #include "logo.h"
 
 #include <Wire.h>
-
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+     
+#define VEXT_PIN 37
 
 #define SERVICE_NAME "LoRaBLE"
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BatteryService BLEUUID((uint16_t)0x180F)
 
 #define BAND    915E6  //you can set band here directly,e.g. 868E6,915E6
 
-#define Fbattery    3700  //The default battery is 3700mv when the battery is fully charged.
-
-float XS = 0.00225;      //The returned reading is multiplied by this XS to get the battery voltage.
-uint16_t MUL = 1000;
-uint16_t MMUL = 100;
-
 BLEServer *pServer = NULL;
+
 BLECharacteristic *pTxCharacteristic;
+BLECharacteristic *pRxCharacteristic;
+BLECharacteristic BatteryLevelCharacteristic(BLEUUID((uint16_t) 0x2A19),
+                                             BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+
+BLEDescriptor BatteryLevelDescriptor(BLEUUID((uint16_t) 0x2901));
+
+BLECharacteristic SerialNoCharacteristic(BLEUUID((uint16_t) 0x2A25),
+                                         BLECharacteristic::PROPERTY_READ);
+//BLEDescriptor SerialNoDescriptor(BLEUUID((uint16_t) 0x2A25));
+
+
+char chip_id[13] = {0};
+
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 uint8_t txValue = 0;
@@ -35,7 +45,8 @@ unsigned int counter = 0;
 bool receiveflag = false; // software flag for LoRa receiver, received data makes it true.
 long lastSendTime = 0;        // last send time
 int interval = 1000;          // interval between sends
-uint64_t chipid;
+bool resendflag = false;
+bool deepsleepflag = false;
 
 void logo() {
     Heltec.display->clear();
@@ -43,85 +54,27 @@ void logo() {
     Heltec.display->display();
 }
 
-void WIFISetUp(void) {
-    // Set WiFi to station mode and disconnect from an AP if it was previously connected
-    WiFi.disconnect(true);
-    delay(100);
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoConnect(true);
-    WiFi.begin("Your WiFi SSID", "Your Password");//fill in "Your WiFi SSID","Your Password"
-    delay(100);
+uint8_t estimateBatteryPercentage() {
+    uint8_t level;
+    uint16_t mv = analogRead(VEXT_PIN) * 0.00225 * 1000;
+    level = ceil((float) (mv - 3000) / 7.5) + 50;
+    Serial.printf("Batt mV: %i (%i%%)", mv, level);
+    Serial.println();
 
-    byte count = 0;
-    while (WiFi.status() != WL_CONNECTED && count < 10) {
-        count++;
-        delay(500);
-        Heltec.display->drawString(0, 0, "Connecting...");
-        Heltec.display->display();
-    }
-
-    Heltec.display->clear();
-    if (WiFi.status() == WL_CONNECTED) {
-        Heltec.display->drawString(0, 0, "Connecting...OK.");
-        Heltec.display->display();
-//		delay(500);
+    return level;
+    // TODO: voltage divider
+    // https://github.com/G6EJD/LiPo_Battery_Capacity_Estimator/blob/master/ReadBatteryCapacity_LIPO.ino
+    float voltage = analogRead(39) / 4096.0 * 7.23;    // NODEMCU ESP32 with 100K+100K voltage divider added
+    Serial.println("Voltage = " + String(voltage));
+    if (voltage > 4.19) {
+        return 100;
+    } else if (voltage <= 3.50) {
+        return 0;
     } else {
-        Heltec.display->clear();
-        Heltec.display->drawString(0, 0, "Connecting...Failed");
-        Heltec.display->display();
-        //while(1);
-    }
-    Heltec.display->drawString(0, 10, "WIFI Setup done");
-    Heltec.display->display();
-    delay(500);
-}
-
-void WIFIScan(unsigned int value) {
-    unsigned int i;
-    WiFi.mode(WIFI_STA);
-
-    for (i = 0; i < value; i++) {
-        Heltec.display->drawString(0, 20, "Scan start...");
-        Heltec.display->display();
-
-        int n = WiFi.scanNetworks();
-        Heltec.display->drawString(0, 30, "Scan done");
-        Heltec.display->display();
-        delay(500);
-        Heltec.display->clear();
-
-        if (n == 0) {
-            Heltec.display->clear();
-            Heltec.display->drawString(0, 0, "no network found");
-            Heltec.display->display();
-            //while(1);
-        } else {
-            Heltec.display->drawString(0, 0, (String) n);
-            Heltec.display->drawString(14, 0, "networks found:");
-            Heltec.display->display();
-            delay(500);
-
-            for (int i = 0; i < n; ++i) {
-                // Print SSID and RSSI for each network found
-                Heltec.display->drawString(0, (i + 1) * 9, (String)(i + 1));
-                Heltec.display->drawString(6, (i + 1) * 9, ":");
-                Heltec.display->drawString(12, (i + 1) * 9, (String)(WiFi.SSID(i)));
-                Heltec.display->drawString(90, (i + 1) * 9, " (");
-                Heltec.display->drawString(98, (i + 1) * 9, (String)(WiFi.RSSI(i)));
-                Heltec.display->drawString(114, (i + 1) * 9, ")");
-                //            display.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
-                delay(10);
-            }
-        }
-
-        Heltec.display->display();
-        delay(800);
-        Heltec.display->clear();
+        return 2808.3808 * pow(voltage, 4) - 43560.9157 * pow(voltage, 3) + 252848.5888 * pow(voltage, 2) -
+               650767.4615 * voltage + 626532.5703;
     }
 }
-
-bool resendflag = false;
-bool deepsleepflag = false;
 
 void interrupt_GPIO0() {
     delay(10);
@@ -134,36 +87,43 @@ void interrupt_GPIO0() {
 }
 
 void send() {
-    LoRa.beginPacket();
-    LoRa.print("hello ");
-    LoRa.print(counter++);
+    LoRa.beginPacket(false);
+    char buffer[9] = {0};
+    sprintf(buffer, "%08X", esp_random());
+    LoRa.print(buffer);
     LoRa.endPacket();
 }
 
 void displaySendReceive() {
-    Heltec.display->drawString(0, 50, "Packet " + (String)(counter - 1) + " sent done");
-    Heltec.display->drawString(0, 0, "Received Size  " + packSize + " packages:");
+    Heltec.display->clear();
+    Heltec.display->drawString(0, 50, "Packet " + (String)(counter) + " received");
+    Heltec.display->drawString(0, 0, "Size:  " + packSize + " packages:");
     Heltec.display->drawString(0, 10, packet);
     Heltec.display->drawString(0, 20, "With " + rssi + "db");
     Heltec.display->display();
-    delay(100);
-    Heltec.display->clear();
 }
 
 void onReceive(int packetSize)//LoRa receiver interrupt service
 {
     //if (packetSize == 0) return;
-
     packet = "";
     packSize = String(packetSize, DEC);
-
+    
     while (LoRa.available()) {
         packet += (char) LoRa.read();
     }
-
+    
     Serial.println(packet);
     rssi = "RSSI: " + String(LoRa.packetRssi(), DEC);
+    counter++;
     receiveflag = true;
+    
+
+    if (deviceConnected) {
+      // SET / NOTIFY Bluetooth
+      pTxCharacteristic->setValue(packet.c_str());
+      pTxCharacteristic->notify();
+    }
 }
 
 
@@ -183,12 +143,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
         std::string rxValue = pCharacteristic->getValue();
 
         if (rxValue.length() > 0) {
-            Serial.println("*********");
-            Serial.print("Received Value: ");
-            for (int i = 0; i < rxValue.length(); i++)
-                Serial.print(rxValue[i]);
-            Serial.println();
-            Serial.println("*********");
+            Serial.println(rxValue.c_str());
 
             LoRa.beginPacket();
             LoRa.print(rxValue.c_str());
@@ -197,19 +152,17 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     }
 };
 
+void setupLoRa() {
+    attachInterrupt(0, interrupt_GPIO0, FALLING);
 
-void setup() {
-    Heltec.begin(true /*DisplayEnable Enable*/, true /*LoRa Enable*/, true /*Serial Enable*/, true /*LoRa use PABOOST*/,
-                 BAND /*LoRa RF working band*/);
+    LoRa.setSyncWord(0x23);
 
-    logo();
-    delay(300);
-    Heltec.display->clear();
+    LoRa.onReceive(onReceive);
+    send();
+    LoRa.receive();
+}
 
-    adcAttachPin(13);
-    analogSetClockDiv(255); // 1338mS
-
-    Serial.begin(115200);
+void setupBLE() {
 
     // Create the BLE Device
     BLEDevice::init(SERVICE_NAME);
@@ -229,52 +182,85 @@ void setup() {
 
     pTxCharacteristic->addDescriptor(new BLE2902());
 
-    BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+    pRxCharacteristic = pService->createCharacteristic(
             CHARACTERISTIC_UUID_RX,
             BLECharacteristic::PROPERTY_WRITE
     );
 
     pRxCharacteristic->setCallbacks(new MyCallbacks());
 
-    // TODO: battery level characteristic
-    //BLEUnsignedCharCharacteristic batteryLevelChar("2A19",  // standard 16-bit characteristic UUID
-    //  BLERead | BLENotify); // remote clients will be able to get notifications if this characteristic changes
-    // For ayone who needs to get the battery level from a BLE device (if it supports such), the Battery Service UUID is 0x180F and the battery level characterisitc UUID is 0x2A19, reporting a one byte value with the battery level as a percentage (UInt8).
+    // TODO: additional characterists
+    // band
+    // sync word
+    // spread factor
+    // PABOOST
+
+    BLEService *pBattery = pServer->createService(BatteryService);
+
+    pBattery->addCharacteristic(&BatteryLevelCharacteristic);
+    BatteryLevelDescriptor.setValue("Percentage 0 - 100");
+    BatteryLevelCharacteristic.addDescriptor(&BatteryLevelDescriptor);
+    BatteryLevelCharacteristic.addDescriptor(new BLE2902());
+
+
+    pServer->getAdvertising()->addServiceUUID(BatteryService);
+
+    pBattery->start();
+    // Start advertising
+    pServer->getAdvertising()->start();
+
+
 
     // Start the service
     pService->start();
 
     // Start advertising
     pServer->getAdvertising()->start();
-    Serial.println("Waiting a client connection to notify...");
 
-    /*
-    WIFISetUp();
-    WiFi.disconnect(); //重新初始化WIFI
-    WiFi.mode(WIFI_STA);
-    delay(100);
 
-    WIFIScan(1);
-    */
+}
 
+void setupADC()
+{
+    adcAttachPin(13);
+    analogSetClockDiv(255); // 1338mS
+}
+
+void setupSerial()
+{
+    Serial.begin(115200);
+}
+
+void setChipID()
+{
+    uint64_t chipid;
     chipid = ESP.getEfuseMac();//The chip ID is essentially its MAC address(length: 6 bytes).
-    Serial.printf("ESP32ChipID=%04X", (uint16_t)(chipid >> 32));//print High 2 bytes
-    Serial.printf("%08X\n", (uint32_t) chipid);//print Low 4bytes.
+    sprintf(chip_id, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t) chipid);
+    Serial.printf("ESP32 chip ID: %s", chip_id);
+    Serial.println();
 
-    attachInterrupt(0, interrupt_GPIO0, FALLING);
+    // TODO:
+    // pService->addCharacteristic(&SerialNoCharacteristic);
+    // SerialNoCharacteristic->setValue(chip_id);
+}
 
-    LoRa.setSyncWord(0x23);
-
-    LoRa.onReceive(onReceive);
-    send();
-    LoRa.receive();
-    displaySendReceive();
+void setup() {
+    Heltec.begin(true, true, true, false, BAND);
+    logo();
+    setupSerial();
+    setChipID();
+    setupADC();
+    setupBLE();
+    setupLoRa();
 }
 
 
 void loop() {
-    uint16_t c  =  analogRead(37)*XS*MUL;
-    Serial.println(c);
+    /*
+    uint8_t percentage = estimateBatteryPercentage();
+    BatteryLevelCharacteristic.setValue(&percentage, 1);
+    BatteryLevelCharacteristic.notify();
+    //*/
 
     if (deepsleepflag) {
         LoRa.end();
@@ -301,6 +287,7 @@ void loop() {
         LoRa.receive();
         displaySendReceive();
     }
+    
     if (receiveflag) {
         digitalWrite(25, HIGH);
         displaySendReceive();
@@ -310,13 +297,6 @@ void loop() {
         LoRa.receive();
         // TODO: relay over bluetooth
         displaySendReceive();
-    }
-
-    if (deviceConnected) {
-        pTxCharacteristic->setValue(&txValue, 1);
-        pTxCharacteristic->notify();
-        txValue++;
-        delay(10); // bluetooth stack will go into congestion, if too many packets are sent
     }
 
     // disconnecting
