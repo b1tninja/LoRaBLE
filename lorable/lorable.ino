@@ -12,33 +12,47 @@
 #define VEXT_PIN 37
 
 #define SERVICE_NAME "LoRaBLE"
-#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
-#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
-#define BatteryService BLEUUID((uint16_t)0x180F)
+#define LORABLE_SERVICE_UUID       "704A0000-DEAD-BEEF-CAFE-062319881337"
+#define UART_SERVICE_UUID       "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX  "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX  "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BATTERY_SERVICE_UUID BLEUUID((uint16_t)0x180F)
 
-#define BAND    915E6  //you can set band here directly,e.g. 868E6,915E6
+// 915 MHz is the center frequency of the band bounded by 902 and 928 MHz.
+// Within this band, FCC regulations allow 50 mV/m electrical field strength, at a distance of 3 meters from the transmitting antenna.
+
+#define BAND_LLIMIT 902E6
+#define DEFAULT_FREQ 915E6
+#define BAND_ULIMIT 928E6
+
 
 BLEServer *pServer = NULL;
 
 BLECharacteristic *pTxCharacteristic;
 BLECharacteristic *pRxCharacteristic;
-BLECharacteristic BatteryLevelCharacteristic(BLEUUID((uint16_t) 0x2A19),
-                                             BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+BLECharacteristic BatteryLevelCharacteristic(BLEUUID((uint16_t) 0x2A19), BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+//BLEDescriptor BatteryLevelDescriptor(BLEUUID((uint16_t) 0x2901));
 
-BLEDescriptor BatteryLevelDescriptor(BLEUUID((uint16_t) 0x2901));
-
-BLECharacteristic SerialNoCharacteristic(BLEUUID((uint16_t) 0x2A25),
-                                         BLECharacteristic::PROPERTY_READ);
+BLECharacteristic SerialNoCharacteristic(BLEUUID((uint16_t) 0x2A25), BLECharacteristic::PROPERTY_READ);
 //BLEDescriptor SerialNoDescriptor(BLEUUID((uint16_t) 0x2A25));
+
+#define FREQUENCY_CHARACTERISTIC_UUID     "704A0001-DEAD-BEEF-CAFE-062319881337"
+#define SYNCWORD_CHARACTERISTIC_UUID      "704A0002-DEAD-BEEF-CAFE-062319881337"
+#define SPREADFACTOR_CHARACTERISTIC_UUID  "704A0003-DEAD-BEEF-CAFE-062319881337"
+#define PABOOST_CHARACTERISTIC_UUID       "704A0004-DEAD-BEEF-CAFE-062319881337"
+
+BLECharacteristic FrequencyCharacteristic(FREQUENCY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+BLECharacteristic SWCharacteristic(SYNCWORD_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+BLECharacteristic SFCharacteristic(SPREADFACTOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+BLECharacteristic PABoostCharacteristic(PABOOST_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
 
 
 char chip_id[13] = {0};
-
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 uint8_t txValue = 0;
-String rssi = "RSSI --";
+int rssi;
+float snr;
 String packSize = "--";
 String packet;
 unsigned int counter = 0;
@@ -47,6 +61,9 @@ long lastSendTime = 0;        // last send time
 int interval = 1000;          // interval between sends
 bool resendflag = false;
 bool deepsleepflag = false;
+uint32_t freq = DEFAULT_FREQ;
+uint8_t sync = 23;
+uint8_t sf = 7;
 
 void logo() {
     Heltec.display->clear();
@@ -96,10 +113,11 @@ void send() {
 
 void displaySendReceive() {
     Heltec.display->clear();
-    Heltec.display->drawString(0, 50, "Packet " + (String)(counter) + " received");
     Heltec.display->drawString(0, 0, "Size:  " + packSize + " packages:");
     Heltec.display->drawString(0, 10, packet);
-    Heltec.display->drawString(0, 20, "With " + rssi + "db");
+    Heltec.display->drawString(0, 20, "RSSI: " + String(rssi) + "db");
+    Heltec.display->drawString(0, 30, "SNR: " + String(snr) + "db");
+    Heltec.display->drawString(0, 50, "Packet " + (String)(counter) + " received");
     Heltec.display->display();
 }
 
@@ -114,7 +132,8 @@ void onReceive(int packetSize)//LoRa receiver interrupt service
     }
     
     Serial.println(packet);
-    rssi = "RSSI: " + String(LoRa.packetRssi(), DEC);
+    rssi = LoRa.packetRssi();
+    snr = LoRa.packetSnr();
     counter++;
     receiveflag = true;
     
@@ -155,7 +174,13 @@ class MyCallbacks : public BLECharacteristicCallbacks {
 void setupLoRa() {
     attachInterrupt(0, interrupt_GPIO0, FALLING);
 
-    LoRa.setSyncWord(0x23);
+    FrequencyCharacteristic.setValue((uint8_t*)&freq, sizeof(freq));
+    SWCharacteristic.setValue(&sync, sizeof(sync));
+    SFCharacteristic.setValue(&sf, sizeof(sf));
+
+    LoRa.setSpreadingFactor(sf);
+    LoRa.setSyncWord(sync);
+    // LoRa.begin instead of Heltec init?
 
     LoRa.onReceive(onReceive);
     send();
@@ -171,53 +196,45 @@ void setupBLE() {
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
 
-    // Create the BLE Service
-    BLEService *pService = pServer->createService(SERVICE_UUID);
-
-    // Create a BLE Characteristic
-    pTxCharacteristic = pService->createCharacteristic(
+    BLEService *pUARTService = pServer->createService(UART_SERVICE_UUID);
+    pTxCharacteristic = pUARTService->createCharacteristic(
             CHARACTERISTIC_UUID_TX,
             BLECharacteristic::PROPERTY_NOTIFY
     );
 
     pTxCharacteristic->addDescriptor(new BLE2902());
 
-    pRxCharacteristic = pService->createCharacteristic(
+    pRxCharacteristic = pUARTService->createCharacteristic(
             CHARACTERISTIC_UUID_RX,
             BLECharacteristic::PROPERTY_WRITE
     );
 
     pRxCharacteristic->setCallbacks(new MyCallbacks());
 
-    // TODO: additional characterists
-    // band
-    // sync word
-    // spread factor
-    // PABOOST
-
-    BLEService *pBattery = pServer->createService(BatteryService);
+    BLEService *pBattery = pServer->createService(BATTERY_SERVICE_UUID);
 
     pBattery->addCharacteristic(&BatteryLevelCharacteristic);
-    BatteryLevelDescriptor.setValue("Percentage 0 - 100");
-    BatteryLevelCharacteristic.addDescriptor(&BatteryLevelDescriptor);
-    BatteryLevelCharacteristic.addDescriptor(new BLE2902());
+//    BatteryLevelDescriptor.setValue("Percentage 0 - 100");
+//    BatteryLevelCharacteristic.addDescriptor(&BatteryLevelDescriptor);
 
+    BLEService *pService = pServer->createService(LORABLE_SERVICE_UUID);
 
-    pServer->getAdvertising()->addServiceUUID(BatteryService);
+    pService->addCharacteristic(&FrequencyCharacteristic);
+    pService->addCharacteristic(&SWCharacteristic);
+    pService->addCharacteristic(&SFCharacteristic);   
+    pService->addCharacteristic(&PABoostCharacteristic);   
+    // TODO: descriptors
 
     pBattery->start();
-    // Start advertising
-    pServer->getAdvertising()->start();
-
-
-
-    // Start the service
+    pUARTService->start();
     pService->start();
 
-    // Start advertising
+
+    pServer->getAdvertising()->addServiceUUID(BATTERY_SERVICE_UUID);
+    pServer->getAdvertising()->addServiceUUID(LORABLE_SERVICE_UUID);
+    pServer->getAdvertising()->addServiceUUID(UART_SERVICE_UUID);
+
     pServer->getAdvertising()->start();
-
-
 }
 
 void setupADC()
@@ -238,6 +255,8 @@ void setChipID()
     sprintf(chip_id, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t) chipid);
     Serial.printf("ESP32 chip ID: %s", chip_id);
     Serial.println();
+    Serial.printf("LoRa freq: %i", freq);
+    Serial.println();
 
     // TODO:
     // pService->addCharacteristic(&SerialNoCharacteristic);
@@ -245,7 +264,7 @@ void setChipID()
 }
 
 void setup() {
-    Heltec.begin(true, true, true, false, BAND);
+    Heltec.begin(true, true, true, false, freq);
     logo();
     setupSerial();
     setChipID();
