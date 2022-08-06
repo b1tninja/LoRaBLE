@@ -2,7 +2,7 @@
 ![LoRaBLE](lorable.png)
 
 A low power Long-Range [LoRa](https://en.wikipedia.org/wiki/LoRa)
-Bluetooth ([BLE](https://en.wikipedia.org/wiki/Bluetooth_Low_Energy)) relay for the ESP32 LoRa v2.
+Bluetooth [BLE](https://en.wikipedia.org/wiki/Bluetooth_Low_Energy) relay for the ESP32 LoRa v2.
 
 ## Hardware
 

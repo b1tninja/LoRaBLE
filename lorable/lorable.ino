@@ -136,10 +136,8 @@ void onReceive(int packetSize)//LoRa receiver interrupt service
     snr = LoRa.packetSnr();
     counter++;
     receiveflag = true;
-    
 
     if (deviceConnected) {
-      // SET / NOTIFY Bluetooth
       pTxCharacteristic->setValue(packet.c_str());
       pTxCharacteristic->notify();
     }
@@ -157,7 +155,7 @@ class MyServerCallbacks : public BLEServerCallbacks {
 };
 
 
-class MyCallbacks : public BLECharacteristicCallbacks {
+class BLECbUartRx : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         std::string rxValue = pCharacteristic->getValue();
 
@@ -171,12 +169,23 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     }
 };
 
+class BLECbSyncword : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        sync = atoi(pCharacteristic->getValue().c_str());
+    }
+};
+
+
 void setupLoRa() {
+    Serial.printf("LoRa freq: %i", freq);
+    Serial.println();
+
     attachInterrupt(0, interrupt_GPIO0, FALLING);
 
     FrequencyCharacteristic.setValue((uint8_t*)&freq, sizeof(freq));
     SWCharacteristic.setValue(&sync, sizeof(sync));
     SFCharacteristic.setValue(&sf, sizeof(sf));
+
 
     LoRa.setSpreadingFactor(sf);
     LoRa.setSyncWord(sync);
@@ -194,7 +203,7 @@ void setupBLE() {
 
     // Create the BLE Server
     pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks());
+    pServer->setCallbacks(new BLEServerCallbacks());
 
     BLEService *pUARTService = pServer->createService(UART_SERVICE_UUID);
     pTxCharacteristic = pUARTService->createCharacteristic(
@@ -209,7 +218,7 @@ void setupBLE() {
             BLECharacteristic::PROPERTY_WRITE
     );
 
-    pRxCharacteristic->setCallbacks(new MyCallbacks());
+    pRxCharacteristic->setCallbacks(new BLECbUartRx());
 
     BLEService *pBattery = pServer->createService(BATTERY_SERVICE_UUID);
 
@@ -221,6 +230,9 @@ void setupBLE() {
 
     pService->addCharacteristic(&FrequencyCharacteristic);
     pService->addCharacteristic(&SWCharacteristic);
+
+    SWCharacteristic.setCallbacks(new BLECbSyncword());
+
     pService->addCharacteristic(&SFCharacteristic);   
     pService->addCharacteristic(&PABoostCharacteristic);   
     // TODO: descriptors
@@ -248,26 +260,25 @@ void setupSerial()
     Serial.begin(115200);
 }
 
-void setChipID()
+void getChipID()
 {
-    uint64_t chipid;
-    chipid = ESP.getEfuseMac();//The chip ID is essentially its MAC address(length: 6 bytes).
-    sprintf(chip_id, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t) chipid);
-    Serial.printf("ESP32 chip ID: %s", chip_id);
-    Serial.println();
-    Serial.printf("LoRa freq: %i", freq);
-    Serial.println();
+    // TODO: String.reserve
+    //    String chip_id;
+    //    chip_id.reserve(13);
+    static uint64_t id = { 0 };
+    id = ESP.getEfuseMac();
+    sprintf(chip_id, "%04X%08X", (uint16_t)(id >> 32), (uint32_t) id);
+    Serial.printf("ESP32 chip ID: %s\n", chip_id);
 
-    // TODO:
-    // pService->addCharacteristic(&SerialNoCharacteristic);
-    // SerialNoCharacteristic->setValue(chip_id);
+    // TODO: move to setup ble?
+    SerialNoCharacteristic.setValue(chip_id);
 }
 
 void setup() {
-    Heltec.begin(true, true, true, false, freq);
+    Heltec.begin(true, true, true, true, freq);
     logo();
     setupSerial();
-    setChipID();
+    getChipID();
     setupADC();
     setupBLE();
     setupLoRa();
@@ -309,12 +320,9 @@ void loop() {
     
     if (receiveflag) {
         digitalWrite(25, HIGH);
-        displaySendReceive();
-        delay(1000);
         receiveflag = false;
         send();
         LoRa.receive();
-        // TODO: relay over bluetooth
         displaySendReceive();
     }
 
